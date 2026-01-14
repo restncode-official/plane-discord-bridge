@@ -18,6 +18,7 @@ import (
 // --- Configuration & Globals ---
 var (
 	WorkspaceName = getEnv("WORKSPACE_NAME", "Workspace")
+	WorkspaceSlug = getEnv("WORKSPACE_SLUG", "workspace")
 	WebhookSecret = getEnv("WEBHOOK_SECRET", "")
 	DiscordURL    = getEnv("DISCORD_WEBHOOK_URL", "")
 	AppURL        = getEnv("APP_URL", "https://plane.so")
@@ -44,6 +45,7 @@ type DiscordEmbed struct {
 	Description string       `json:"description,omitempty"`
 	Color       int          `json:"color"`
 	Author      *EmbedAuthor `json:"author,omitempty"`
+	Thumbnail   *EmbedImage  `json:"thumbnail,omitempty"`
 	Footer      *EmbedFooter `json:"footer,omitempty"`
 	Fields      []EmbedField `json:"fields,omitempty"`
 }
@@ -51,6 +53,10 @@ type DiscordEmbed struct {
 type EmbedAuthor struct {
 	Name    string `json:"name"`
 	IconURL string `json:"icon_url"`
+}
+
+type EmbedImage struct {
+	URL string `json:"url"`
 }
 
 type EmbedFooter struct {
@@ -118,11 +124,32 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	data, _ := p["data"].(map[string]interface{})
 	activity, _ := p["activity"].(map[string]interface{})
 
+	// Extract Actor info
+	actor, _ := activity["actor"].(map[string]interface{})
+	actorName, _ := actor["display_name"].(string)
+	actorIcon, _ := actor["avatar"].(string)
+	if actorIcon == "" {
+		actorIcon, _ = actor["avatar_url"].(string)
+	}
+	if actorIcon != "" && len(actorIcon) > 0 && actorIcon[0] == '/' {
+		actorIcon = fmt.Sprintf("%s%s", AppURL, actorIcon)
+	}
+
 	embed := DiscordEmbed{
 		Author: &EmbedAuthor{
-			Name:    fmt.Sprintf("Update in %s", WorkspaceName),
-			IconURL: fmt.Sprintf("%s/plane-icon.png", AppURL),
+			Name:    WorkspaceName,
+			IconURL: fmt.Sprintf("%s/img/plane-icon.png", AppURL),
 		},
+		Footer: &EmbedFooter{
+			Text: "Plane Bridge",
+		},
+	}
+
+	if actorName != "" {
+		embed.Author.Name = actorName
+		if actorIcon != "" {
+			embed.Author.IconURL = actorIcon
+		}
 	}
 
 	if event == "issue" {
@@ -132,6 +159,9 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		switch action {
 		case "created":
 			log.Printf("[INFO] Issue Created: %s", name)
+			if actorName != "" {
+				embed.Author.Name = fmt.Sprintf("%s created an issue", actorName)
+			}
 			embed.Color = 8184715
 			embed.Title = name
 			embed.Description = fmt.Sprintf("%v", data["description_stripped"])
@@ -139,8 +169,12 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 			embed.Fields = append(embed.Fields, EmbedField{Name: "Priority", Value: priorities[prio], Inline: true})
 
 		case "deleted":
+			if actorName != "" {
+				embed.Author.Name = fmt.Sprintf("%s deleted an issue", actorName)
+			} else {
+				embed.Author.Name = "Work item deleted"
+			}
 			embed.Color = 16415088
-			embed.Author.Name = "Work item deleted"
 			embed.Description = fmt.Sprintf("ID: `%s`", issueID)
 
 		case "updated":
@@ -154,15 +188,88 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 			lastUpdated[issueID] = now
 			mu.Unlock()
 
+			field := fmt.Sprintf("%v", activity["field"])
+
+			// Whitelist
+			allowed := map[string]bool{
+				"name":           true,
+				"priority":       true,
+				"state":          true,
+				"state_id":       true,
+				"assignee_ids":   true,
+				"target_date":    true,
+				"parent":         true,
+				"estimate_point": true,
+			}
+			if !allowed[field] {
+				return
+			}
+
 			embed.Color = 4093438
 			embed.Title = name
-			field := fmt.Sprintf("%v", activity["field"])
+
 			oldV := fmt.Sprintf("%v", activity["old_value"])
 			newV := fmt.Sprintf("%v", activity["new_value"])
 
-			// Ignore high-noise fields
-			if field == "state_id" || field == "sort_order" {
-				return
+			if field == "priority" {
+				oldV = priorities[oldV]
+				newV = priorities[newV]
+			}
+
+			if field == "state_id" || field == "state" {
+				field = "State"
+				if st, ok := data["state"].(map[string]interface{}); ok {
+					newV, _ = st["name"].(string)
+				}
+				if oldV == "null" || oldV == "<nil>" {
+					oldV = "None"
+				} else {
+					oldV = "Changed"
+				}
+			}
+
+			if field == "assignee_ids" {
+				field = "Assignees"
+				assignees, _ := data["assignees"].([]interface{})
+				var names []string
+				for _, a := range assignees {
+					if amap, ok := a.(map[string]interface{}); ok {
+						if dname, ok := amap["display_name"].(string); ok {
+							names = append(names, dname)
+						}
+					}
+				}
+				newV = "None"
+				if len(names) > 0 {
+					newV = ""
+					for i, n := range names {
+						if i > 0 {
+							newV += ", "
+						}
+						newV += n
+					}
+				}
+				if oldV == "[]" || oldV == "null" || oldV == "<nil>" {
+					oldV = "None"
+				} else {
+					oldV = "Previously set"
+				}
+
+				// If we have assignees, set the first one's avatar as thumbnail
+				if len(assignees) > 0 {
+					if first, ok := assignees[0].(map[string]interface{}); ok {
+						favatar, _ := first["avatar"].(string)
+						if favatar == "" {
+							favatar, _ = first["avatar_url"].(string)
+						}
+						if favatar != "" {
+							if favatar[0] == '/' {
+								favatar = fmt.Sprintf("%s%s", AppURL, favatar)
+							}
+							embed.Thumbnail = &EmbedImage{URL: favatar}
+						}
+					}
+				}
 			}
 
 			embed.Description = fmt.Sprintf("Field **%s** changed.", field)
@@ -175,10 +282,23 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 
 	if event == "issue_comment" {
 		embed.Color = 8184715
-		embed.Author.Name = "New Comment"
+		if actorName != "" {
+			embed.Author.Name = fmt.Sprintf("%s commented", actorName)
+		} else {
+			embed.Author.Name = "New Comment"
+		}
 		comment, _ := data["comment_stripped"].(string)
 		embed.Description = comment
-		embed.Fields = append(embed.Fields, EmbedField{Name: "Issue ID", Value: fmt.Sprintf("%v", data["issue"]), Inline: true})
+
+		issueID := fmt.Sprintf("%v", data["issue"])
+		issueName := "Issue Update"
+		if issue, ok := data["issue_detail"].(map[string]interface{}); ok {
+			if n, ok := issue["name"].(string); ok {
+				issueName = n
+			}
+		}
+		embed.Title = issueName
+		embed.Fields = append(embed.Fields, EmbedField{Name: "Issue ID", Value: issueID, Inline: true})
 	}
 
 	sendToDiscord(embed)
