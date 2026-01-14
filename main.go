@@ -86,7 +86,7 @@ func verifySignature(body []byte, signature string) bool {
 func sendToDiscord(embed DiscordEmbed) {
 	payload := map[string]interface{}{
 		"username":   "Plane",
-		"avatar_url": fmt.Sprintf("%s/plane-icon.png", AppURL),
+		"avatar_url": fmt.Sprintf("%s/img/plane-icon.png", AppURL),
 		"embeds":     []DiscordEmbed{embed},
 	}
 	body, _ := json.Marshal(payload)
@@ -112,6 +112,9 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 
 	event, _ := p["event"].(string)
 	action, _ := p["action"].(string)
+
+	log.Printf("[DEBUG] Event: %s | Action: %s | Payload: %s", event, action, string(body))
+
 	data, _ := p["data"].(map[string]interface{})
 	activity, _ := p["activity"].(map[string]interface{})
 
@@ -190,6 +193,9 @@ func main() {
 	})
 
 	http.HandleFunc("/", webhookHandler)
+
+	// Allow img directory for avatar URL
+	http.Handle("/img/", http.StripPrefix("/img/", http.FileServer(http.Dir("img"))))
 
 	log.Printf("[INFO] Server listening on port %s", WebPort)
 	log.Fatal(http.ListenAndServe(":"+WebPort, nil))
