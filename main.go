@@ -152,7 +152,10 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	handled := false
+
 	if event == "issue" {
+		handled = true
 		issueID := fmt.Sprintf("%v", data["id"])
 		name, _ := data["name"].(string)
 
@@ -277,10 +280,11 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 				Name:  "Change",
 				Value: fmt.Sprintf("`%s` → `%s`", oldV, newV),
 			})
+		default:
+			return // Ignore other actions for issues
 		}
-	}
-
-	if event == "issue_comment" {
+	} else if event == "issue_comment" {
+		handled = true
 		embed.Color = 8184715
 		if actorName != "" {
 			embed.Author.Name = fmt.Sprintf("%s commented", actorName)
@@ -299,6 +303,19 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		embed.Title = issueName
 		embed.Fields = append(embed.Fields, EmbedField{Name: "Issue ID", Value: issueID, Inline: true})
+	}
+
+	if !handled {
+		log.Printf("[INFO] Skipping unhandled event: %s action: %s", event, action)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Double check for "empty" content
+	if embed.Title == "" && embed.Description == "" {
+		log.Printf("[WARN] Skipping empty embed for event: %s", event)
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
 	sendToDiscord(embed)
